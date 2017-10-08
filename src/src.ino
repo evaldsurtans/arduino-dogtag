@@ -3,7 +3,9 @@
 #include <stdlib.h>
 #include "Vector3D.h"
 
-// #define DEBUG
+//#define DEBUG
+//#define DEBUG_CONNECTION
+
 // pinouts
 #define PIN_BUTTON 1
 #define PIN_BUZZER 0
@@ -15,8 +17,8 @@
 #define MODE_TRACKING 3
 #define MODE_BACKGROUND 4
 
-#define TIMEOUT_CALIBRATE 2000
-#define TIMEOUT_VIBRATION 300
+#define TIMEOUT_CALIBRATE 5000
+#define TIMEOUT_VIBRATION 500
 #define TIMEOUT_VIBRATION_PAUSE 300
 #define TIMEOUT_BETWEEN_DETECTION 2000
 
@@ -34,14 +36,16 @@ Vector3D _vec_straight;
 float _angle_slouch = 0.0f;
 
 bool _is_button_down = false;
-char _temp_cast_string_buf[50];
+char _temp_cast_string_buf[20];
 
 // cackground tracking mode
-// 1500 bytes max total usable memory
-#define MAX_DATA_POSTURE 750
+// 400 bytes max total usable memory
+// buffer for 5 minutes
+#define MAX_DATA_POSTURE 200
 int8_t* _data_posture_y = new int8_t[MAX_DATA_POSTURE];
 int8_t* _data_posture_z = new int8_t[MAX_DATA_POSTURE];
 uint16_t _count_data_posture = 0;
+int _timeout_background = 0;
 
 void on_button_down() {
    _is_button_down = true;
@@ -81,7 +85,7 @@ String float_to_string(float value)
   return result;
 }
 
-String get_json_attr(String key, String value, bool is_string)
+void write_json_attr(String key, String value, bool is_string)
 {
   String formatedValue = value;
   if(is_string)
@@ -89,18 +93,18 @@ String get_json_attr(String key, String value, bool is_string)
     formatedValue = String("\"") + value + String("\": ");
   }
 
-  return String("\"") + key + String("\": ") + formatedValue;
+  Serial.print(String("\"") + key + String("\": ") + formatedValue);
 }
 
-String get_json_vec(Vector3D vec)
+void write_json_vec(Vector3D vec)
 {
-  String value = "{";
-
-  value += get_json_attr("x", float_to_string(vec.x), false) + ",";
-  value += get_json_attr("y", float_to_string(vec.y), false) + ",";
-  value += get_json_attr("z", float_to_string(vec.z), false) + ",";
-
-  return value + "}";
+  Serial.print("{");
+  write_json_attr(String("x"), float_to_string(vec.x), false);
+  Serial.print(",");
+  write_json_attr(String("y"), float_to_string(vec.y), false);
+  Serial.print(",");
+  write_json_attr(String("z"), float_to_string(vec.z), false);
+  Serial.print("}");
 }
 
 void vibrate(int count) {
@@ -147,26 +151,31 @@ void loop() {
     String query = Serial.readString();
 
     String msg = query;
-  	String param = "";
+    String param = "";
 
-  	int pos = query.indexOf(" ");
+  	int pos = msg.indexOf(" ");
   	if (pos >= 0)
   	{
   		msg = query.substring(0, pos);
   		param = query.substring(pos);
   	}
-
     //Response as JSON
     Serial.print("{");
 
     if(msg == "flush")
     {
-        Serial.print(get_json_attr("bat", String(battery_level, DEC), false) + ",");
-        Serial.print(get_json_attr("temp", String(temperature, DEC), false) + ",");
-        Serial.print(get_json_attr("vec", get_json_vec(vec_current), false) + ",");
-        Serial.print(get_json_attr("norm", get_json_vec(vec_current_norm), false) + ",");
+        write_json_attr("bat", String(battery_level, DEC), false);
+        Serial.print(",");
+        write_json_attr("temp", String(temperature, DEC), false);
+        Serial.print(",");
+        write_json_attr("vec", "", false);
+        write_json_vec(vec_current);
+        Serial.print(",");
+        write_json_attr("norm", "", false);
+        write_json_vec(vec_current_norm);
+        Serial.print(",");
 
-        Serial.print("data:[");
+        Serial.print("\"data\":[");
         for(int i = 0; i < _count_data_posture; i++)
         {
           Serial.print("[");
@@ -184,6 +193,7 @@ void loop() {
     }
 
     Serial.print("}\n");
+
   }
 
   // Active tracking mode
@@ -205,7 +215,7 @@ void loop() {
 
       _vec_slouch = vec_posture_norm.copy();
       _angle_slouch = _vec_straight.angle(&_vec_slouch);
-      _timer_slouch_detected = 0;
+      _timer_slouch_detected = TIMEOUT_BETWEEN_DETECTION;
       vibrate(2);
     }
   }
@@ -220,14 +230,15 @@ void loop() {
     }
   }
   else if(_mode == MODE_BACKGROUND) {
-    if(_count_data_posture < MAX_DATA_POSTURE)
+    if(_count_data_posture < MAX_DATA_POSTURE && _timeout_background >= 1000)
     {
       // convert to 8bit
-      int8_t y = (int8_t)(vec_current_norm.y * 255.0f);
-      int8_t z = (int8_t)(vec_current_norm.y * 255.0f);
+      int8_t y = (int8_t)(vec_current_norm.y * 127.0f);
+      int8_t z = (int8_t)(vec_current_norm.z * 127.0f);
       _data_posture_y[_count_data_posture] = y;
       _data_posture_z[_count_data_posture] = z;
       _count_data_posture++;
+      _timeout_background = 0;
     }
   }
 
@@ -261,7 +272,7 @@ void loop() {
     _is_button_down = false;
   }
 
-#ifdef DEBUG
+#ifdef DEBUG_CONNECTION
   if(is_connected) {
     Bean.setLed(0, 255, 0);
   } else {
@@ -273,18 +284,19 @@ void loop() {
 
   if(_mode != MODE_NONE)
   {
-    if(_mode == MODE_BACKGROUND)
-    {
-      if(_count_data_posture < MAX_DATA_POSTURE)
+      if(_mode == MODE_BACKGROUND)
       {
+        if(_count_data_posture < MAX_DATA_POSTURE)
+        {
+          timeout = 1000;
+          _timeout_background += timeout;
+        }
+      }
+      else
+      {
+        //Active tracking
         timeout = 1000;
       }
-    }
-    else
-    {
-      //Active tracking
-      timeout = 200;
-    }
   }
 
   if(_mode == MODE_CALIBRATE_SLOUCH || _mode == MODE_CALIBRATE_STRAIGHT) {
