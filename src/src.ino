@@ -17,7 +17,8 @@
 #define MODE_TRACKING 3
 #define MODE_BACKGROUND 4
 
-#define TIMEOUT_CALIBRATE 5000
+#define TIMEOUT_CALIBRATE_STRAIGHT 7000
+#define TIMEOUT_CALIBRATE_SLOUCH 3000
 #define TIMEOUT_VIBRATION 500
 #define TIMEOUT_VIBRATION_PAUSE 300
 #define TIMEOUT_BETWEEN_DETECTION 2000
@@ -238,7 +239,7 @@ void loop() {
   // Active tracking mode
   if(_mode == MODE_CALIBRATE_STRAIGHT) {
     //First straight posture
-    if(_timer_calibrate >= TIMEOUT_CALIBRATE) {
+    if(_timer_calibrate >= TIMEOUT_CALIBRATE_STRAIGHT) {
       _timer_calibrate = 0;
       _mode = MODE_CALIBRATE_SLOUCH;
 
@@ -248,7 +249,7 @@ void loop() {
   }
   else if(_mode == MODE_CALIBRATE_SLOUCH) {
     //Second slouch posture
-    if(_timer_calibrate >= TIMEOUT_CALIBRATE) {
+    if(_timer_calibrate >= TIMEOUT_CALIBRATE_SLOUCH) {
       _timer_calibrate = 0;
       _mode = MODE_TRACKING;
 
