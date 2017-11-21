@@ -3,8 +3,8 @@
 #include <stdlib.h>
 #include "Vector3D.h"
 
-//#define DEBUG
-//#define DEBUG_CONNECTION
+//#define DEBUG //Serial info for debugging - not usable together with ionic app
+#define DEBUG_CONNECTION //LED when connected
 
 // pinouts
 #define PIN_BUTTON 1
@@ -22,6 +22,10 @@
 #define TIMEOUT_VIBRATION_PAUSE 300
 #define TIMEOUT_BETWEEN_DETECTION 2000
 
+// Automatically disconnect after transmission if not disconnected
+// Prevent staying in connected state for prolonged period of time
+#define TIMEOUT_DISCONNECT 5000
+
 #define IS_BACGROUND_MODE_ENABLED 1
 #define SLOUCH_COEF 0.5f
 
@@ -29,6 +33,7 @@
 
 // active tracking mode
 int _mode = MODE_NONE;
+int _timer_disconnect = 0;
 int _timer_calibrate = 0;
 int _timer_slouch_detected = 0;
 Vector3D _vec_slouch;
@@ -38,10 +43,14 @@ float _angle_slouch = 0.0f;
 bool _is_button_down = false;
 char _temp_cast_string_buf[20];
 
-// cackground tracking mode
+bool _is_serial_open = false;
+
+// Background tracking mode
 // 400 bytes max total usable memory
-// buffer for 5 minutes
-#define MAX_DATA_POSTURE 200
+// buffer for MAX_DATA_POSTURE secs - 3min interval
+#define MAX_DATA_POSTURE 200 //items
+#define TIMEOUT_POSTURE_DATAPOINT 1000 //ms
+
 int8_t* _data_posture_y = new int8_t[MAX_DATA_POSTURE];
 int8_t* _data_posture_z = new int8_t[MAX_DATA_POSTURE];
 uint16_t _count_data_posture = 0;
@@ -52,30 +61,33 @@ void on_button_down() {
 }
 
 void setup() {
+
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_BUZZER, OUTPUT);
 
   digitalWrite(PIN_BUZZER, LOW);
 
-  Bean.setAccelerationRange(2);
-  // Unusable for step tracking
+  Bean.setAccelerationRange(VALUE_2G);
 
-  Bean.setAccelerometerPowerMode(VALUE_NORMAL_MODE);
-  Bean.enableMotionEvent(ANY_MOTION_EVENT);
-  //Bean.disableMotionEvents();
+  //https://github.com/PunchThrough/bean-arduino-core/blob/c4f0420496a87f59a1dc95d7c340c66f600195ee/hardware/bean/avr/cores/bean/bma250.h
+  //https://www.evernote.com/l/ACmo0m6iWNtBD7UKXTM_vPoU6_nWvTlWFps
+  Bean.setAccelerometerPowerMode(VALUE_LOW_POWER_100MS);
+
+  // Unfortunately, Unusable for step tracking
+  //Bean.enableMotionEvent(ANY_MOTION_EVENT);
+  Bean.disableMotionEvents();
 
   attachPinChangeInterrupt(PIN_BUTTON, on_button_down, FALLING);
 
   Bean.setLed(0, 0, 0);
   Bean.enableWakeOnConnect(true);
 
-  Serial.begin(57600);
-
   if(IS_BACGROUND_MODE_ENABLED) {
     _mode = MODE_BACKGROUND;
   }
 }
 
+// Communication function
 String float_to_string(float value)
 {
   // width, precision
@@ -85,6 +97,7 @@ String float_to_string(float value)
   return result;
 }
 
+// Communication function
 void write_json_attr(String key, String value, bool is_string)
 {
   String formatedValue = value;
@@ -96,6 +109,7 @@ void write_json_attr(String key, String value, bool is_string)
   Serial.print(String("\"") + key + String("\": ") + formatedValue);
 }
 
+// Communication function
 void write_json_vec(Vector3D vec)
 {
   Serial.print("{");
@@ -107,6 +121,8 @@ void write_json_vec(Vector3D vec)
   Serial.print("}");
 }
 
+// Signal to user
+// Device function
 void vibrate(int count) {
   for(int i = 0; i < count; i++)
   {
@@ -122,6 +138,24 @@ void vibrate(int count) {
 
 void loop() {
   bool is_connected = Bean.getConnectionState();
+
+  if(is_connected)
+  {
+    if(!_is_serial_open)
+    {
+      _is_serial_open = true;
+      Serial.begin(57600);
+    }
+  }
+  else
+  {
+    _timer_disconnect = 0;
+    if(_is_serial_open)
+    {
+      _is_serial_open = false;
+      Serial.end();
+    }
+  }
 
   Vector3D vec_current(
     Bean.getAccelerationX()/MAX_16_BIT,
@@ -144,10 +178,13 @@ void loop() {
   int battery_level = Bean.getBatteryLevel();
 
 #ifdef DEBUG
-  Serial.println("interrupt");
+  if(_is_serial_open)
+  {
+    Serial.println("interrupt");
+  }
 #endif
 
-  if (Serial.available() > 0) {
+  if (_is_serial_open && Serial.available() > 0) {
     String query = Serial.readString();
 
     String msg = query;
@@ -194,6 +231,8 @@ void loop() {
 
     Serial.print("}\n");
 
+    //Reset disconnect timer
+    _timer_disconnect = 0;
   }
 
   // Active tracking mode
@@ -230,7 +269,7 @@ void loop() {
     }
   }
   else if(_mode == MODE_BACKGROUND) {
-    if(_count_data_posture < MAX_DATA_POSTURE && _timeout_background >= 1000)
+    if(_count_data_posture < MAX_DATA_POSTURE && _timeout_background >= TIMEOUT_POSTURE_DATAPOINT)
     {
       // convert to 8bit
       int8_t y = (int8_t)(vec_current_norm.y * 127.0f);
@@ -262,7 +301,10 @@ void loop() {
     }
 
 #ifdef DEBUG
-    Serial.println("button down");
+    if(_is_serial_open)
+    {
+      Serial.println("button down");
+    }
     // LED indicator for button press
     Bean.setLed(255, 0, 0);
     Bean.sleep(1000);
@@ -286,6 +328,7 @@ void loop() {
   {
       if(_mode == MODE_BACKGROUND)
       {
+        // if no space for tracking data then sleep forever until data flush
         if(_count_data_posture < MAX_DATA_POSTURE)
         {
           timeout = 1000;
@@ -306,6 +349,15 @@ void loop() {
   {
     _timer_slouch_detected -= timeout;
     _timer_slouch_detected = max(_timer_slouch_detected, 0);
+  }
+
+  if(is_connected)
+  {
+    _timer_disconnect += timeout;
+    if(_timer_disconnect > TIMEOUT_DISCONNECT)
+    {
+      Bean.disconnect();
+    }
   }
 
   Bean.sleep(timeout);
